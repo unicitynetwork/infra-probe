@@ -92,10 +92,12 @@ export async function probeFulcrum(url, { timeoutMs = 12_000 } = {}) {
     // ---- 3. blockchain.headers.subscribe (chain tip) ----
     const tipStart = Date.now();
     let tipHeight;
+    let tipHeader;
     try {
       const tip = await rpc(ws, pending, 'blockchain.headers.subscribe', [], Math.min(5_000, timeoutMs));
       // Result format: { height: <int>, hex: <80-byte hex header> }
       tipHeight = tip?.height;
+      tipHeader = tip?.hex;
       const latencyMs = Date.now() - tipStart;
       if (typeof tipHeight === 'number' && tipHeight > 0) {
         checks.push({
@@ -119,6 +121,63 @@ export async function probeFulcrum(url, { timeoutMs = 12_000 } = {}) {
         latencyMs: Date.now() - tipStart,
         message: err instanceof Error ? err.message : String(err),
       });
+    }
+
+    // ---- 4. chain-tip-freshness (functional) ----
+    // Decode the block header timestamp (bytes 68-72, little-endian uint32
+    // = unix seconds) and check it's recent. ALPHA's target block time is
+    // 2 minutes; a healthy node's tip should be < 30 minutes old.
+    //
+    // ALPHA block headers are 112 bytes (32 bytes longer than Bitcoin's
+    // canonical 80) — the timestamp is still at the standard offset 68.
+    // We accept any header at least 80 bytes (160 hex) so the freshness
+    // check works on both Bitcoin-derivative chains and Unicity ALPHA.
+    if (tipHeader && typeof tipHeader === 'string' && tipHeader.length >= 160) {
+      try {
+        const headerBytes = Buffer.from(tipHeader, 'hex');
+        // Bitcoin-style block header layout: version(4) prevHash(32) merkle(32) time(4) bits(4) nonce(4)
+        // → time at offset 68, little-endian.
+        const tipTimestampSec = headerBytes.readUInt32LE(68);
+        const ageSeconds = Math.floor(Date.now() / 1000) - tipTimestampSec;
+        const ageMin = (ageSeconds / 60).toFixed(1);
+        const status = ageSeconds < 1_800 ? 'pass' : ageSeconds < 7_200 ? 'warn' : 'fail';
+        checks.push({
+          name: 'chain-tip-fresh',
+          status,
+          latencyMs: 0,
+          message: status === 'fail'
+            ? `tip is ${ageMin}min old — chain has not made a block in over 2h (target = 2min)`
+            : status === 'warn'
+              ? `tip is ${ageMin}min old (slow — target 2min)`
+              : `tip is ${ageMin}min old (target 2min)`,
+        });
+      } catch (err) {
+        checks.push({ name: 'chain-tip-fresh', status: 'warn', latencyMs: 0, message: `header parse failed: ${err instanceof Error ? err.message : String(err)}` });
+      }
+    }
+
+    // ---- 5. blockchain.transaction.id_from_pos at tip-1 (functional) ----
+    // Verify the node can serve indexed historical data, not just the tip.
+    // Picks a block height the chain definitely has (tipHeight - 1) and
+    // asks for the first transaction's txid. This exercises Fulcrum's
+    // block-tx index — a common operation for wallet history rebuilds.
+    if (typeof tipHeight === 'number' && tipHeight > 1) {
+      const idxStart = Date.now();
+      try {
+        const txid = await rpc(ws, pending, 'blockchain.transaction.id_from_pos', [tipHeight - 1, 0], Math.min(5_000, timeoutMs));
+        const latencyMs = Date.now() - idxStart;
+        const valid = typeof txid === 'string' && /^[0-9a-f]{64}$/i.test(txid);
+        checks.push({
+          name: 'tx-index',
+          status: valid ? (latencyMs > 3_000 ? 'warn' : 'pass') : 'fail',
+          latencyMs,
+          message: valid
+            ? `tx@${tipHeight - 1}:0 = ${txid.slice(0, 16)}…`
+            : `unexpected response: ${JSON.stringify(txid).slice(0, 80)}`,
+        });
+      } catch (err) {
+        checks.push({ name: 'tx-index', status: 'fail', latencyMs: Date.now() - idxStart, message: err instanceof Error ? err.message : String(err) });
+      }
     }
 
     const failed = checks.filter((c) => c.status === 'fail').length;

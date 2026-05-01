@@ -17,6 +17,7 @@ export const NETWORKS = {
       'https://unicity-ipfs1.dyndns.org',
     ],
     fulcrum: 'wss://fulcrum.unicity.network:50004',
+    marketApi: 'https://market-api.unicity.network',
   },
   testnet: {
     label: 'Testnet',
@@ -28,6 +29,7 @@ export const NETWORKS = {
       'https://unicity-ipfs1.dyndns.org',
     ],
     fulcrum: 'wss://fulcrum.unicity.network:50004',
+    marketApi: 'https://market-api.unicity.network',
   },
   dev: {
     label: 'Development',
@@ -39,6 +41,7 @@ export const NETWORKS = {
       'https://unicity-ipfs1.dyndns.org',
     ],
     fulcrum: 'wss://fulcrum.unicity.network:50004',
+    marketApi: 'https://market-api.unicity.network',
   },
 };
 

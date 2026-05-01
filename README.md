@@ -2,35 +2,52 @@
 
 Tiny availability + performance probe for [Unicity Network](https://unicity.network) infrastructure.
 
-Designed as a **pre-flight gate** for end-to-end test suites and a **5-second smoke test** when something feels off. Runs four parallel probes — Nostr relay, L3 Aggregator, IPFS gateway, L1 Fulcrum — and reports per-check latency in either a colored human-readable format or single-line JSON for downstream parsing.
+Designed as a **pre-flight gate** for end-to-end test suites and a **5-second smoke test** when something feels off. Runs five parallel probes — Nostr relay, L3 Aggregator, IPFS gateway, L1 Fulcrum, and the Market intent database — exercises both the **liveness** of each endpoint and the **functional write+read+verify path** real wallet flows depend on, then reports per-check latency in either a colored human-readable format or single-line JSON.
 
 ```
-✅ nostr        wss://nostr-relay.testnet.unicity.network
-   ✓ connect                   87ms   WebSocket handshake OK
-   ✓ subscribe-kind:1          71ms   EOSE in 71ms (5 event(s))
-   ✓ publish-kind:1           158ms   OK accepted=true
-   ✓ read-back                 70ms   1 event(s) returned
+✅ aggregator   https://goggregator-test.unicity.network
+   ✓ health                  60ms   healthy (db ok, 2 shards ok, 60ms)
+   ✓ json-rpc                 7ms   OK — structured error: Shard ID not found: 0
+   ✓ submit_commitment       39ms   accepted (status=SUCCESS, 39ms)
+   ✓ get_inclusion_proof      7ms   proof returned in 7ms
    Status: HEALTHY (4/4 checks passed)
 
-✅ aggregator   https://goggregator-test.unicity.network
-   ✓ get_block_height         240ms   block 1234567
-   Status: HEALTHY (1/1 checks passed)
-   block height: 1234567
+✅ nostr        wss://nostr-relay.testnet.unicity.network
+   ✓ connect                 87ms   WebSocket handshake OK
+   ✓ subscribe-kind:1        71ms   EOSE in 71ms (5 event(s))
+   ✓ publish-kind:1         190ms   published+stored (190ms; read-back 1 event)
+   ✓ publish-kind:4         182ms   published+stored (182ms; read-back 1 event)
+   ✓ publish-kind:1059      187ms   published+stored (187ms; read-back 1 event)
+   ✓ publish-kind:30078     201ms   published+stored (201ms; read-back 1 event)
+   ✓ publish-kind:31113     179ms   published+stored (179ms; read-back 1 event)
+   ✓ publish-kind:31115     183ms   published+stored (183ms; read-back 1 event)
+   ✓ publish-kind:31116     176ms   published+stored (176ms; read-back 1 event)
+   ✓ publish-kind:9         185ms   published+stored (185ms; read-back 1 event)
+   ✓ publish-kind:25050     181ms   published+stored (181ms; read-back 1 event)
+   ✓ publish-kind:30000     188ms   published+stored (188ms; read-back 1 event)
+   Status: HEALTHY
 
-⚠️  ipfs         https://unicity-ipfs1.dyndns.org
-   ✓ liveness                  41ms   HTTP 200 OK
-   ✓ kubo-api                  93ms   Kubo 0.18.1
-   ⚠ fetch-known-cid         5734ms   OK (5734ms — slow, cold cache?)
-   Status: DEGRADED (2/3 checks passed)
+✅ ipfs         https://unicity-ipfs1.dyndns.org
+   ✓ kubo-api               230ms   Kubo 0.39.0
+   ✓ gateway-route            3ms   HTTP 200 (image/jpeg, 3ms)
+   ✓ ipfs-add                 6ms   cid=bafkreieu5rue4yh55meuurfzeedvxmpn6riogv4goo6nxg6gn6kxnovv3m
+   ✓ ipfs-fetch              17ms   byte-identical roundtrip (256 bytes, 17ms)
+   Status: HEALTHY (4/4 checks passed)
 
 ✅ fulcrum      wss://fulcrum.unicity.network:50004
-   ✓ connect                  142ms   WebSocket handshake OK
-   ✓ server.version            34ms   Fulcrum 1.10.0
-   ✓ chain-tip                 42ms   block 250123
-   Status: HEALTHY (3/3 checks passed)
-   chain tip: 250123
+   ✓ connect                 35ms   WebSocket handshake OK
+   ✓ server.version           3ms   Fulcrum 1.12.0
+   ✓ chain-tip               24ms   block 501098
+   ✓ chain-tip-fresh          0ms   tip is 0.8min old (target 2min)
+   ✓ tx-index                 2ms   tx@501097:0 = df056744adac3761…
+   Status: HEALTHY (5/5 checks passed)
 
-  Summary: 3 HEALTHY, 1 DEGRADED, 0 UNREACHABLE  (of 4)
+✅ market       https://market-api.unicity.network
+   ✓ search                3708ms   20 intent(s) returned (3708ms)
+   ✓ feed-recent           1016ms   10 listing(s) returned (1016ms)
+   Status: HEALTHY (2/2 checks passed)
+
+  Summary: 5 HEALTHY, 0 DEGRADED, 0 UNREACHABLE  (of 5)
 ```
 
 ## Install
@@ -91,30 +108,56 @@ The JSON output is **shape-stable** — service names, check names, status enums
 
 ### Nostr relay
 
+**Liveness:**
 1. **connect** — WebSocket TLS + handshake.
 2. **subscribe-kind:1** — sends `["REQ", id, {kinds:[1], limit:5}]`; times REQ → first message AND REQ → EOSE. A relay that returns events but never EOSEs is distinguished from one that's wholly silent.
-3. **publish-kind:1** — signs an ephemeral kind:1 with a single-shot keypair, sends `["EVENT", e]`; waits for `["OK", id, true, ...]`.
-4. **read-back** — subscribes to `{kinds:[1], authors:[ourPubkey]}` and confirms the event we just published is returned.
 
-The ephemeral keypair is generated per-run and never persisted — the probe leaves only an ephemeral text-note signed by an unrecognised pubkey.
+**Functional (write+confirm across every Unicity-used kind):**
+3. **publish-kind:N** for each of `1, 4, 9, 1059, 25050, 30000, 30078, 31113, 31115, 31116`. Each kind:
+   - signs an ephemeral event with a fresh single-shot keypair;
+   - sends `["EVENT", e]` and waits for `["OK", id, true, ...]` (write path);
+   - re-queries `{kinds:[N], authors:[ourPubkey]}` and confirms the event is stored (indexed read path).
+
+The relay must accept and store each kind for production wallet flows to work end-to-end. Each ephemeral keypair is generated per-publish and never persisted — the probe leaves only short-lived events signed by random pubkeys.
 
 ### Aggregator (L3)
 
-1. **get_block_height** — JSON-RPC `get_block_height` over HTTPS. Healthy aggregators return `{ blockNumber: N }` within a few hundred milliseconds.
+**Liveness:**
+1. **health** — `GET /health`. Operator-facing endpoint; returns `{ status, database, aggregators: {...} }`.
+2. **json-rpc** — `POST` with a deliberately-invalid `shardId`. A structured `Shard ID not found` reply is healthy (proves the JSON-RPC handler is alive); a non-JSON reply is failure.
 
-The probe sends the SDK's public API key (`X-API-Key` header) by default; override via `--api-key` for higher-rate-limit lanes.
+**Functional (full submit + retrieve roundtrip):**
+3. **submit_commitment** — generates an ephemeral secp256k1 keypair, builds a fully-signed `SubmitCommitmentRequest` (canonical wire format mirrored from `@unicitylabs/state-transition-sdk`: DataHash imprints, RequestId = SHA-256(pubkey ‖ stateImprint), 65-byte recoverable signature), and submits.
+4. **get_inclusion_proof** — polls for the inclusion proof of the just-submitted commitment for up to 5 s. A returned proof confirms the WRITE was actually persisted into the SMT and is retrievable through the read API.
 
 ### IPFS gateway
 
-1. **liveness** — `HEAD /` to the gateway origin.
-2. **kubo-api** — `POST /api/v0/version` (Kubo HTTP API). `warn` if the API is not exposed on the gateway (`HTTP 404`); `pass` if it returns the Kubo version JSON.
-3. **fetch-known-cid** — `GET /ipfs/bafkreigh2akiscaildcqabsyg3dfr6chu3fgpregiymsck7e7aqa4s52zy`, the canonical "hello world\n" file used by Kubo's smoke tests. `pass` on byte-identical content within 5 s; `warn` on byte-identical but slow (cold cache); `fail` on mismatch or HTTP error.
+**Liveness:**
+1. **kubo-api** — `POST /api/v0/version`; returns Kubo version info.
+2. **gateway-route** — `HEAD /ipfs/<canonical-cid>`; verifies path routing.
+
+**Functional (write+read+verify roundtrip):**
+3. **ipfs-add** — uploads ~256 bytes of random content via `POST /api/v0/add?pin=false&cid-version=1`. `pin=false` keeps the probe stateless: the node will GC the bytes on its next sweep, so we don't need to call `pin/rm` (which the unicity gateway has locked down anyway).
+4. **ipfs-fetch** — `GET /ipfs/<just-added-cid>` and asserts byte-identical content match. The byte-comparison is critical because the unicity gateway has been observed to return a placeholder JPEG (HTTP 200 + `image/jpeg`) for unpinned/missing CIDs — a "HTTP 200 = OK" check would false-pass.
 
 ### L1 Fulcrum (ALPHA blockchain Electrum server)
 
+**Liveness:**
 1. **connect** — WSS handshake.
-2. **server.version** — Electrum-protocol handshake; returns server software string + protocol version.
-3. **chain-tip** — `blockchain.headers.subscribe`; returns current block height + 80-byte header hex. Rising height across runs = "L1 is making blocks".
+2. **server.version** — Electrum-protocol handshake.
+3. **chain-tip** — `blockchain.headers.subscribe`; current block height + header.
+
+**Functional:**
+4. **chain-tip-fresh** — decodes the block-header timestamp (offset 68, LE uint32) and asserts it's recent. Healthy: <30 min old. Warn: <2 h. Fail: ≥2 h. ALPHA target block time is 2 min so the typical age is sub-minute.
+5. **tx-index** — `blockchain.transaction.id_from_pos [tipHeight − 1, 0]`; verifies the node serves indexed historical data, not just the live tip. This is the path wallet history rebuilds and address subscriptions depend on.
+
+### Market / Intent database
+
+**Liveness:**
+1. **search** — `POST /api/search` with `{query: "test"}`. Healthy: HTTP 200 + JSON body whose `intents` field is an array (possibly empty). This one call exercises the embedding pipeline (semantic search) end-to-end.
+
+**Functional:**
+2. **feed-recent** — `GET /api/feed/recent`. Cross-checks the search engine against the raw feed. If search works but feed/recent doesn't, the embedding pipeline is sick; if both work, the database is fully online.
 
 ## Embedding
 
@@ -142,21 +185,21 @@ process.exit(exitCodeForReport(report));
   "completedAt": "2026-05-01T16:23:51.000Z",
   "services": [
     {
-      "service": "nostr",
-      "endpoint": "wss://nostr-relay.testnet.unicity.network",
+      "service": "aggregator",
+      "endpoint": "https://goggregator-test.unicity.network",
       "status": "healthy",
-      "latencyMs": 446,
+      "latencyMs": 92,
       "checks": [
-        { "name": "connect",            "status": "pass", "latencyMs":  87, "message": "WebSocket handshake OK" },
-        { "name": "subscribe-kind:1",   "status": "pass", "latencyMs":  71, "message": "EOSE in 71ms (5 event(s))", "eventCount": 5 },
-        { "name": "publish-kind:1",     "status": "pass", "latencyMs": 158, "message": "OK accepted=true" },
-        { "name": "read-back",          "status": "pass", "latencyMs":  70, "message": "1 event(s) returned" }
+        { "name": "health",              "status": "pass", "latencyMs":  43, "message": "healthy (db ok, 2 shards ok, 43ms)" },
+        { "name": "json-rpc",            "status": "pass", "latencyMs":   9, "message": "OK — structured error: Shard ID not found: 0" },
+        { "name": "submit_commitment",   "status": "pass", "latencyMs":  34, "message": "accepted (status=SUCCESS, 34ms)" },
+        { "name": "get_inclusion_proof", "status": "pass", "latencyMs":   5, "message": "proof returned in 5ms" }
       ],
-      "timestamp": "2026-05-01T16:23:45.000Z"
+      "timestamp": "2026-05-01T16:23:45.832Z"
     }
     // ...
   ],
-  "summary": { "total": 4, "healthy": 4, "degraded": 0, "unreachable": 0 }
+  "summary": { "total": 5, "healthy": 5, "degraded": 0, "unreachable": 0 }
 }
 ```
 

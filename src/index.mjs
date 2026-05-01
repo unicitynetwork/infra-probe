@@ -13,8 +13,9 @@ import { probeNostrRelay } from './probes/nostr.mjs';
 import { probeAggregator } from './probes/aggregator.mjs';
 import { probeIpfsGateway } from './probes/ipfs.mjs';
 import { probeFulcrum } from './probes/fulcrum.mjs';
+import { probeMarket } from './probes/market.mjs';
 
-export const SERVICES = ['nostr', 'aggregator', 'ipfs', 'fulcrum'];
+export const SERVICES = ['nostr', 'aggregator', 'ipfs', 'fulcrum', 'market'];
 
 /**
  * @param {object} options
@@ -39,6 +40,7 @@ export async function runProbes({ network = 'testnet', only, timeoutMs = 20_000,
     aggregator: () => probeAggregator(cfg.aggregator,           { timeoutMs, apiKey: aggregatorApiKey }),
     ipfs:       () => probeIpfsGateway(cfg.ipfsGateways[0],     { timeoutMs }),
     fulcrum:    () => probeFulcrum(cfg.fulcrum,                 { timeoutMs }),
+    market:     () => probeMarket(cfg.marketApi,                { timeoutMs }),
   };
 
   const tasks = requested.map((name) => {
