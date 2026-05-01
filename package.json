@@ -1,0 +1,54 @@
+{
+  "name": "@unicitylabs/infra-probe",
+  "version": "0.1.0",
+  "description": "Availability + performance probe for Unicity Network infrastructure (Nostr relay, Aggregator, IPFS gateway, L1 Fulcrum). Pre-flight check for e2e tests; CI-friendly JSON output.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Unicity Network <https://unicity.network>",
+  "homepage": "https://github.com/unicitynetwork/infra-probe",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/unicitynetwork/infra-probe.git"
+  },
+  "bugs": {
+    "url": "https://github.com/unicitynetwork/infra-probe/issues"
+  },
+  "keywords": [
+    "unicity",
+    "infrastructure",
+    "health-check",
+    "nostr",
+    "ipfs",
+    "fulcrum",
+    "monitoring",
+    "preflight"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "unicity-infra-probe": "./bin/unicity-infra-probe.mjs"
+  },
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node ./bin/unicity-infra-probe.mjs",
+    "probe:testnet": "node ./bin/unicity-infra-probe.mjs --network testnet",
+    "probe:mainnet": "node ./bin/unicity-infra-probe.mjs --network mainnet",
+    "probe:json": "node ./bin/unicity-infra-probe.mjs --format json",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {}
+}

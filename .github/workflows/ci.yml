@@ -1,0 +1,75 @@
+# Continuous integration for unicity-infra-probe.
+#
+# Two jobs:
+#
+#   1. `lint-and-help` — install deps, run `--help`, run `--version`. Fast,
+#      deterministic, network-free. Confirms the bin file is wired correctly
+#      and that argv parsing doesn't blow up on the trivial paths.
+#
+#   2. `live-probe-testnet` — actually probe the live testnet relay /
+#      aggregator / IPFS / Fulcrum. Designed to be informational rather
+#      than blocking: a degraded testnet should NOT fail this repo's CI,
+#      because the whole point of this tool is to detect that condition.
+#      So `continue-on-error: true` and the report is uploaded as an
+#      artifact for inspection.
+#
+# To gate a sister repo's e2e suite on a healthy probe, run this tool
+# yourself with `--quiet` and check the exit code — see README.md.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-help:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Help output
+        run: node ./bin/unicity-infra-probe.mjs --help
+      - name: Version output
+        run: node ./bin/unicity-infra-probe.mjs --version
+      - name: Argv error path
+        run: |
+          set +e
+          node ./bin/unicity-infra-probe.mjs --network nope 2>/dev/null
+          rc=$?
+          set -e
+          if [ $rc -ne 3 ]; then echo "expected exit 3 for bad --network, got $rc"; exit 1; fi
+          echo "✓ bad --network exits with code 3 as documented"
+
+  live-probe-testnet:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - name: Probe testnet
+        id: probe
+        run: |
+          # Capture both pretty (for log readability) and JSON (for artifact).
+          node ./bin/unicity-infra-probe.mjs --network testnet --no-color | tee testnet-pretty.txt
+          node ./bin/unicity-infra-probe.mjs --network testnet --format json --pretty-json > testnet.json
+        env:
+          # No secrets — the SDK's public API key is the default.
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-probe-report
+          path: |
+            testnet-pretty.txt
+            testnet.json
