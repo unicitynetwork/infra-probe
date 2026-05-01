@@ -110,15 +110,29 @@ The JSON output is **shape-stable** — service names, check names, status enums
 
 **Liveness:**
 1. **connect** — WebSocket TLS + handshake.
-2. **subscribe-kind:1** — sends `["REQ", id, {kinds:[1], limit:5}]`; times REQ → first message AND REQ → EOSE. A relay that returns events but never EOSEs is distinguished from one that's wholly silent.
+2. **subscribe-kind:1** — `["REQ", id, {kinds:[1], limit:5}]`, REQ → EOSE roundtrip. **Diagnostic only**: a `fail` here is downgraded to `warn` and does NOT gate the rest of the probe. The unicity testnet relay's broad-author indexed query path has been observed to degrade independently from the publish + author-indexed read paths that wallets actually use, so this single check is not authoritative for "can wallets use this relay?".
 
 **Functional (write+confirm across every Unicity-used kind):**
-3. **publish-kind:N** for each of `1, 4, 9, 1059, 25050, 30000, 30078, 31113, 31115, 31116`. Each kind:
-   - signs an ephemeral event with a fresh single-shot keypair;
-   - sends `["EVENT", e]` and waits for `["OK", id, true, ...]` (write path);
-   - re-queries `{kinds:[N], authors:[ourPubkey]}` and confirms the event is stored (indexed read path).
+3. **publish-kind:N** for each kind in the SDK's emit set:
+   - `1` (BROADCAST) — regular
+   - `4` (DIRECT_MESSAGE / NIP-04) — regular
+   - `1059` (NIP-17 gift wrap) — regular
+   - `25050` (composing indicator / NIP-59) — **ephemeral**
+   - `30078` (NAMETAG_BINDING / NIP-78 app-data) — parameterized replaceable
+   - `31113` (TOKEN_TRANSFER, Unicity custom) — parameterized replaceable
+   - `31115` (PAYMENT_REQUEST, Unicity custom) — parameterized replaceable
+   - `31116` (PAYMENT_REQUEST_RESPONSE, Unicity custom) — parameterized replaceable
 
-The relay must accept and store each kind for production wallet flows to work end-to-end. Each ephemeral keypair is generated per-publish and never persisted — the probe leaves only short-lived events signed by random pubkeys.
+   Each kind: signs an ephemeral event with a fresh single-shot keypair, sends `["EVENT", e]`, waits for `["OK", id, true, ...]`, and verifies according to the kind's NIP-01 classification:
+   - **regular / replaceable** — re-query `{kinds:[N], authors:[ourPubkey]}` and confirm the event is stored.
+   - **ephemeral (kinds 20000-29999)** — only verify the OK ack. Per NIP-01 §16 the relay MUST NOT store ephemeral events, so a read-back-required check would false-fail every healthy relay for kind 25050.
+
+   For parameterized replaceable kinds (30000-39999) we always attach a `d` tag for storage uniqueness.
+
+   The relay verdict is determined **only** by these publish-and-confirm outcomes — `connect` and `subscribe-kind:1` are diagnostics. Each ephemeral keypair is generated per-publish and never persisted; the probe leaves only short-lived events signed by random pubkeys.
+
+**Excluded kinds (intentional):**
+- `kind 9` (NIP-29 group chat) lives on the SDK's separate `DEFAULT_GROUP_RELAYS` (e.g. `wss://chat.unicity.network`), not the wallet relay. A future `groupchat` probe will cover NIP-29.
 
 ### Aggregator (L3)
 

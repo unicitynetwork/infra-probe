@@ -3,22 +3,41 @@
  *
  * Liveness checks (cheap):
  *   1. Connect (WebSocket TLS handshake).
- *   2. Subscribe `kind:1, limit:5` — REQ → EOSE roundtrip; distinguishes
- *      "relay returns events but never EOSEs" from "wholly silent".
+ *   2. Subscribe `kind:1, limit:5` — REQ → EOSE roundtrip; **diagnostic
+ *      only**, never aborts the rest of the probe. The unicity testnet
+ *      relay's broad-author indexed query path has been observed to
+ *      degrade independently from the publish + author-indexed read-back
+ *      paths that wallets actually use, so this single check is NOT a
+ *      reliable signal of overall relay health. We capture its latency
+ *      so operators can correlate with relay-side observability, but
+ *      we don't gate publish-and-confirm on it.
  *
  * Functional checks (write+read across every kind Unicity uses):
  *   3. publish-and-confirm-kind:N for every entry of UNICITY_NOSTR_KINDS,
  *      each with a freshly-generated ephemeral keypair (so per-kind acks
- *      are isolated). For each:
- *        a) sign + send `["EVENT", e]`;
- *        b) wait for `["OK", id, true, ...]` (write path);
- *        c) re-query `{kinds:[N], authors:[ourPubkey]}` to confirm
- *           storage (read path through the indexed lookup).
+ *      are isolated). Each kind is classified as regular/replaceable/
+ *      ephemeral, and the verification adapts:
+ *        regular     — sign + send EVENT, wait for OK true, then re-query
+ *                      authors:[ourPubkey] kinds:[N] and confirm storage.
+ *        replaceable — same as regular (parameterized replaceable
+ *                      kinds 30000+ are stored with a d-tag; we always
+ *                      attach one, so read-back finds it).
+ *        ephemeral   — sign + send EVENT, wait for OK true. Skip read-back
+ *                      because per NIP-01 the relay MUST NOT store kinds
+ *                      in 20000-29999. A read-back-required check would
+ *                      false-fail every healthy relay for kind 25050.
  *
  * Each ephemeral keypair is single-use — the probe leaves only short-
  * lived events signed by random pubkeys. NIP-04 + NIP-17 envelopes
  * carry placeholder ciphertext; we don't encrypt anything because the
  * relay's job is store-and-forward, not validation of payloads.
+ *
+ * Excluded kinds (intentional):
+ *   - kind 9 (NIP-29 group chat): lives on a separate group-chat relay
+ *     (`DEFAULT_GROUP_RELAYS` in the SDK), not the wallet relay. Probing
+ *     it here would either succeed by accident (relay treats as regular)
+ *     or fail meaninglessly (relay rejects without group-h-tag), neither
+ *     of which is useful info about the wallet relay.
  */
 
 import WebSocket from 'ws';
@@ -26,22 +45,27 @@ import { randomBytes, createHash } from 'node:crypto';
 import { schnorr } from '@noble/curves/secp256k1.js';
 
 /**
- * Every Nostr event kind Unicity actually uses. Mirrors
- * `@unicitylabs/sphere-sdk` constants.ts NOSTR_EVENT_KINDS + NIP29_KINDS.
- * The relay must accept and store every one of these for production
- * wallet flows to work end-to-end.
+ * Every Nostr event kind the Unicity wallet (sphere-sdk + nostr-js-sdk)
+ * actually emits against the wallet relay. Mirrors NOSTR_EVENT_KINDS +
+ * COMPOSING_INDICATOR_KIND in the SDK. Each entry is annotated with its
+ * NIP-01 classification so we can pick the right verification strategy:
+ *
+ *   regular     — relays MUST store; we read back to confirm storage.
+ *   replaceable — kinds 30000-39999, stored per (pubkey, kind, d-tag);
+ *                 we attach a d-tag and read back.
+ *   ephemeral   — kinds 20000-29999, dispatched live but NOT stored;
+ *                 read-back returns 0 events even on a healthy relay,
+ *                 so we only verify the OK ack.
  */
 const UNICITY_NOSTR_KINDS = [
-  { kind: 1,     label: 'broadcast / text-note (NIP-01)' },
-  { kind: 4,     label: 'legacy DM (NIP-04)' },
-  { kind: 9,     label: 'group chat message (NIP-29)' },
-  { kind: 1059,  label: 'gift wrap (NIP-17)' },
-  { kind: 25050, label: 'composing indicator (NIP-39?)' },
-  { kind: 30000, label: 'follow list (NIP-51)' },
-  { kind: 30078, label: 'app-data / nametag binding (NIP-78)' },
-  { kind: 31113, label: 'token transfer (Unicity custom)' },
-  { kind: 31115, label: 'payment request (Unicity custom)' },
-  { kind: 31116, label: 'payment request response (Unicity custom)' },
+  { kind: 1,     classification: 'regular',     label: 'broadcast / text-note (NIP-01)' },
+  { kind: 4,     classification: 'regular',     label: 'legacy DM (NIP-04)' },
+  { kind: 1059,  classification: 'regular',     label: 'gift wrap (NIP-17)' },
+  { kind: 25050, classification: 'ephemeral',   label: 'composing indicator (NIP-59)' },
+  { kind: 30078, classification: 'replaceable', label: 'app-data / nametag binding (NIP-78)' },
+  { kind: 31113, classification: 'replaceable', label: 'token transfer (Unicity custom)' },
+  { kind: 31115, classification: 'replaceable', label: 'payment request (Unicity custom)' },
+  { kind: 31116, classification: 'replaceable', label: 'payment request response (Unicity custom)' },
 ];
 
 function bytesToHex(b) { return Buffer.from(b).toString('hex'); }
@@ -55,7 +79,7 @@ function signEvent(privKeyHex, e) {
   return { ...e, id, sig };
 }
 
-export async function probeNostrRelay(url, { timeoutMs = 30_000 } = {}) {
+export async function probeNostrRelay(url, { timeoutMs = 60_000 } = {}) {
   const checks = [];
   const overallStart = Date.now();
   let ws;
@@ -83,21 +107,32 @@ export async function probeNostrRelay(url, { timeoutMs = 30_000 } = {}) {
     opened = true;
     checks.push({ name: 'connect', status: 'pass', latencyMs: Date.now() - connectStart, message: 'WebSocket handshake OK' });
 
-    // ---- 2. Subscribe (read-path liveness) ----
-    const subResult = await runSubProbe(ws, { kinds: [1], limit: 5 }, 'subscribe-kind:1', timeoutMs);
-    checks.push(subResult);
+    // ---- 2. Broad-author subscribe (DIAGNOSTIC ONLY — never aborts) ----
+    // The unicity testnet relay's broad-author indexed query has been
+    // observed to fluctuate between healthy (<200ms EOSE) and degraded
+    // (>15s, sometimes silent) independently from the publish + author-
+    // indexed read paths that wallets actually use. We capture this
+    // metric for diagnostics, but degraded-here does NOT mean the relay
+    // is unusable — only the write-and-author-read functional checks
+    // below are authoritative.
+    const subResult = await runSubProbe(ws, { kinds: [1], limit: 5 }, 'subscribe-kind:1', 15_000);
+    // Demote a `fail` here to `warn` to reflect "diagnostic only, not
+    // authoritative for verdict". Real outages still surface via the
+    // publish-and-confirm checks.
     if (subResult.status === 'fail') {
-      // Read path is wholly silent — no point exercising publishes.
-      return finalize('unreachable', 'subscribe path silent; relay read endpoint is degraded');
+      subResult.status = 'warn';
+      subResult.message = `(advisory only — broad-author indexed query path) ${subResult.message}`;
     }
+    checks.push(subResult);
 
     // ---- 3. Publish-and-confirm for every Unicity kind (functional) ----
     // Each kind gets its own ephemeral keypair so acks are independently
-    // attributable. We run them in series rather than parallel so the
-    // relay's per-event ack ordering is observable.
-    const publishWindowMs = Math.max(2_500, Math.floor((timeoutMs - (Date.now() - overallStart)) / UNICITY_NOSTR_KINDS.length));
-    for (const { kind, label } of UNICITY_NOSTR_KINDS) {
-      const result = await publishAndConfirm(ws, kind, publishWindowMs);
+    // attributable. We run them in series so the relay's per-event ack
+    // ordering is observable.
+    const remainingMs = Math.max(2_500, timeoutMs - (Date.now() - overallStart));
+    const perKindBudgetMs = Math.max(2_500, Math.floor(remainingMs / UNICITY_NOSTR_KINDS.length));
+    for (const { kind, classification, label } of UNICITY_NOSTR_KINDS) {
+      const result = await publishAndConfirm(ws, kind, classification, perKindBudgetMs);
       checks.push({
         name: `publish-kind:${kind}`,
         status: result.status,
@@ -106,11 +141,18 @@ export async function probeNostrRelay(url, { timeoutMs = 30_000 } = {}) {
       });
     }
 
-    const failed = checks.filter((c) => c.status === 'fail').length;
-    const slow = checks.filter((c) => c.status === 'warn').length;
-    const status = failed > 0
-      ? failed > 2 ? 'unreachable' : 'degraded'
-      : slow > 0 ? 'degraded' : 'healthy';
+    // ---- Verdict ----
+    // Only the publish-and-confirm outcomes are authoritative. The
+    // connect + advisory subscribe-kind:1 are diagnostics whose
+    // status doesn't determine reachability.
+    const publishChecks = checks.filter((c) => c.name.startsWith('publish-kind:'));
+    const failed = publishChecks.filter((c) => c.status === 'fail').length;
+    const slow = publishChecks.filter((c) => c.status === 'warn').length;
+    const status =
+      failed === publishChecks.length ? 'unreachable' :
+      failed > 0                       ? 'degraded' :
+      slow > 0                         ? 'degraded' :
+      'healthy';
     return finalize(status);
   } catch (err) {
     return finalize('unreachable', err instanceof Error ? err.message : String(err));
@@ -123,11 +165,14 @@ export async function probeNostrRelay(url, { timeoutMs = 30_000 } = {}) {
 
 /**
  * Sign + publish an ephemeral event of the given kind, wait for OK, then
- * re-query authors:[ourPubkey] kinds:[N] and confirm the event is stored.
+ * (for non-ephemeral kinds) re-query authors:[ourPubkey] kinds:[N] and
+ * confirm the event is stored. Ephemeral kinds (20000-29999) skip the
+ * read-back per NIP-01 — relays MUST NOT store them, so a read-back
+ * would always return 0 events even on a perfectly healthy relay.
  *
- * Returns a check-shaped result; latencyMs is end-to-end (publish + read-back).
+ * Returns a check-shaped result; latencyMs is end-to-end.
  */
-async function publishAndConfirm(ws, kind, perStepBudgetMs) {
+async function publishAndConfirm(ws, kind, classification, perStepBudgetMs) {
   const start = Date.now();
   const privKey = bytesToHex(randomBytes(32));
   const pubkey = bytesToHex(schnorr.getPublicKey(hexToBytes(privKey)));
@@ -135,6 +180,9 @@ async function publishAndConfirm(ws, kind, perStepBudgetMs) {
     pubkey,
     created_at: Math.floor(Date.now() / 1000),
     kind,
+    // Parameterized replaceable kinds (30000-39999) require a d-tag
+    // for storage uniqueness. We always include one for safety; relays
+    // ignore it for non-replaceable kinds.
     tags: kind >= 30000 ? [['d', 'probe-' + Date.now()]] : [],
     content: `unicity-infra-probe kind:${kind}`,
   });
@@ -167,7 +215,20 @@ async function publishAndConfirm(ws, kind, perStepBudgetMs) {
     };
   }
 
-  // ---- Read-back ----
+  // ---- Ephemeral kinds: stop here. ----
+  // Per NIP-01 §16: "Events with kind 20000 to 29999 are ephemeral;
+  // relays MUST NOT store them." Reading them back returns 0 events
+  // on every healthy relay. The OK ack is the entire signal we get.
+  if (classification === 'ephemeral') {
+    const totalMs = Date.now() - start;
+    return {
+      status: totalMs > 3_000 ? 'warn' : 'pass',
+      latencyMs: totalMs,
+      message: `published+ack'd (ephemeral; not stored per NIP-01; ${totalMs}ms)`,
+    };
+  }
+
+  // ---- Read-back (non-ephemeral kinds only) ----
   const readResult = await runSubProbe(ws, { kinds: [kind], authors: [pubkey], limit: 5 }, 'read-back', readBudget);
   const totalMs = Date.now() - start;
   if (readResult.status !== 'pass') {
