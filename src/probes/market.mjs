@@ -57,9 +57,15 @@ export async function probeMarket(url = DEFAULT_MARKET_API_URL, { timeoutMs = 10
       });
       return finalize('degraded', 'search returned unexpected shape');
     }
+    // Semantic search has a different latency profile from a flat REST
+    // GET — the request has to round-trip an embedding model + vector
+    // index lookup. Empirically the unicity service sits in the 1-8 s
+    // range under normal load. We only flag `warn` above 10 s (likely
+    // backend pressure) and let the `unreachable` verdict from a
+    // request failure cover the >30 s pathological case.
     checks.push({
       name: 'search',
-      status: latencyMs > 3_000 ? 'warn' : 'pass',
+      status: latencyMs > 10_000 ? 'warn' : 'pass',
       latencyMs,
       message: `${intents.length} intent(s) returned (${latencyMs}ms)`,
     });
