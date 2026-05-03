@@ -27,7 +27,7 @@
     "node": ">=20.0.0"
   },
   "bin": {
-    "unicity-infra-probe": "./bin/unicity-infra-probe.mjs"
+    "unicity-infra-probe": "bin/unicity-infra-probe.mjs"
   },
   "main": "./src/index.mjs",
   "exports": {
