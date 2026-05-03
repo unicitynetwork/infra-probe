@@ -1,6 +1,6 @@
 {
   "name": "@unicitylabs/infra-probe",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Availability + performance probe for Unicity Network infrastructure (Nostr relay, Aggregator, IPFS gateway, L1 Fulcrum). Pre-flight check for e2e tests; CI-friendly JSON output.",
   "type": "module",
   "license": "MIT",
@@ -37,14 +37,16 @@
     "bin/",
     "src/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "start": "node ./bin/unicity-infra-probe.mjs",
     "probe:testnet": "node ./bin/unicity-infra-probe.mjs --network testnet",
     "probe:mainnet": "node ./bin/unicity-infra-probe.mjs --network mainnet",
     "probe:json": "node ./bin/unicity-infra-probe.mjs --format json",
-    "test": "node --test test/"
+    "test": "node --test tests/*.test.mjs",
+    "prepublishOnly": "npm test"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",

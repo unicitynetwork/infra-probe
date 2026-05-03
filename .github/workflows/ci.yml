@@ -2,16 +2,18 @@
 #
 # Two jobs:
 #
-#   1. `lint-and-help` — install deps, run `--help`, run `--version`. Fast,
-#      deterministic, network-free. Confirms the bin file is wired correctly
-#      and that argv parsing doesn't blow up on the trivial paths.
+#   1. `test-and-lint` — install deps, run `npm test`, run `--help`,
+#      `--version`, and the bad-arg path. Fast, deterministic,
+#      network-free. Confirms the bin file is wired correctly, the
+#      smoke tests all pass, and argv parsing matches its documented
+#      contract.
 #
 #   2. `live-probe-testnet` — actually probe the live testnet relay /
-#      aggregator / IPFS / Fulcrum. Designed to be informational rather
-#      than blocking: a degraded testnet should NOT fail this repo's CI,
-#      because the whole point of this tool is to detect that condition.
-#      So `continue-on-error: true` and the report is uploaded as an
-#      artifact for inspection.
+#      aggregator / IPFS / Fulcrum / market. Designed to be
+#      informational rather than blocking: a degraded testnet should
+#      NOT fail this repo's CI, because the whole point of this tool
+#      is to detect that condition. So `continue-on-error: true` and
+#      the report is uploaded as an artifact for inspection.
 #
 # To gate a sister repo's e2e suite on a healthy probe, run this tool
 # yourself with `--quiet` and check the exit code — see README.md.
@@ -26,7 +28,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  lint-and-help:
+  test-and-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +37,8 @@ jobs:
           node-version: '20'
           cache: 'npm'
       - run: npm ci
+      - name: Smoke tests
+        run: npm test
       - name: Help output
         run: node ./bin/unicity-infra-probe.mjs --help
       - name: Version output
@@ -60,12 +64,12 @@ jobs:
       - run: npm ci
       - name: Probe testnet
         id: probe
+        # No secrets needed — the SDK's public aggregator API key is the
+        # default; every other endpoint is unauthenticated.
         run: |
           # Capture both pretty (for log readability) and JSON (for artifact).
           node ./bin/unicity-infra-probe.mjs --network testnet --no-color | tee testnet-pretty.txt
           node ./bin/unicity-infra-probe.mjs --network testnet --format json --pretty-json > testnet.json
-        env:
-          # No secrets — the SDK's public API key is the default.
       - name: Upload report
         uses: actions/upload-artifact@v4
         with:
